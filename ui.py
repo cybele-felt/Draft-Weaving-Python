@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from model import (DEFAULT_THICKNESS, DEFAULT_WARP_COLOR, DEFAULT_WEFT_COLOR, MAX_THICKNESS,
-                   MIN_THICKNESS, NUM_SHAFTS, Draft, thickness_summary)
+                   MIN_THICKNESS, NUM_SHAFTS, Draft, thickness_summary, yarn_segments)
 from presets import PRESETS
 from print_draft import render_pdf
 
@@ -70,7 +70,7 @@ class DraftEditor(tk.Tk):
         self.title("4-Shaft Draft Designer")
 
         self.brush = "#b8322a"  # colour applied to threads
-        self.result = None  # colour grid from the last Run
+        self.result = None  # (warp-on-top grid, colour grid) from the last Run
         self.stale = True
         self._paint_value = None  # value applied while dragging
 
@@ -283,7 +283,8 @@ class DraftEditor(tk.Tk):
 
     def run(self):
         try:
-            self.result = self.current_draft().color_drawdown()
+            draft = self.current_draft()
+            self.result = (draft.drawdown(), draft.color_drawdown())
         except ValueError as err:
             messagebox.showerror("Invalid draft", str(err))
             return
@@ -462,13 +463,19 @@ class DraftEditor(tk.Tk):
         ox, bottom = r[0][0], r[1][-1]
         ends, picks = len(self.threading), len(self.treadling)
         # A stale drawdown keeps the last result, faded, until Run is pressed.
+        # Yarn shapes use the current thicknesses, so thickness changes show at once.
         if self.result is not None:
+            up, colors = self.result
+            up = [row[:ends] for row in up[:picks]]
+            colors = [row[:ends] for row in colors[:picks]]
             faded = {}
-            for row, cells in enumerate(self.result[:picks]):
-                for col, color in enumerate(cells[:ends]):
-                    if self.stale:
-                        color = faded.setdefault(color, self._fade(color))
-                    self._cell(r, col, row, color)
+            oy = r[1][0]
+            for outline, color in yarn_segments(up, colors, self.warp_thickness,
+                                                self.weft_thickness):
+                if self.stale:
+                    color = faded.setdefault(color, self._fade(color))
+                points = [v for x, y in outline for v in (ox + x * CELL, oy + y * CELL)]
+                c.create_polygon(points, fill=color, outline=GRID_LINE)
         c.create_text(ox, bottom + 10, text="Drawdown", anchor="w")
         summary = (f"Warp thickness: {thickness_summary(self.warp_thickness, 'end')}\n"
                    f"Weft thickness: {thickness_summary(self.weft_thickness, 'pick')}")

@@ -10,7 +10,7 @@ from itertools import accumulate
 
 from matplotlib.collections import PatchCollection
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 
 from model import NUM_SHAFTS, Draft, thickness_summary
 
@@ -106,9 +106,9 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
              fontsize=font * 0.8, color="#555")
 
     # Drawdown
-    for r, row in enumerate(draft.color_drawdown()):
-        for c, color in enumerate(row):
-            rect(xs[c], lower_y + ys[r], xs[c + 1], lower_y + ys[r + 1], color)
+    for outline, color in draft.yarn_drawdown():
+        rects.append(Polygon([(ox + x * cell, oy + (lower_y + y) * cell) for x, y in outline]))
+        fills.append(color)
     text(0, lower_y + ys[-1] + 0.8, "Drawdown", ha="left", fontsize=font + 1, weight="bold")
 
     # Right-hand side: tie-up + treadling, or the merged lift plan

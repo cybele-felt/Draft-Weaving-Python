@@ -1,6 +1,7 @@
 """Data model for a 4-shaft weaving draft."""
 
 from dataclasses import dataclass, field
+from itertools import accumulate
 
 NUM_SHAFTS = 4
 DEFAULT_WARP_COLOR = "#1f3b73"
@@ -8,6 +9,14 @@ DEFAULT_WEFT_COLOR = "#e8c872"
 # Thread thickness is relative: 1.0 is a standard thread, 2.0 twice as thick.
 DEFAULT_THICKNESS = 1.0
 MIN_THICKNESS, MAX_THICKNESS = 0.25, 4.0
+# Yarn is round: where a thicker thread lies on top next to a thinner crossing
+# thread, it spreads over that neighbour by a fraction of the difference in
+# thickness - YARN_SPREAD along its own length (a weft left and right, a warp
+# up and down) and the smaller YARN_SPREAD_ACROSS across it - but never over
+# more than MAX_SPREAD of the neighbour's cell.
+YARN_SPREAD = 0.25
+YARN_SPREAD_ACROSS = 0.1
+MAX_SPREAD = 0.3
 
 
 def _fit(values: list, length: int, default) -> list:
@@ -20,6 +29,75 @@ def _thicknesses(value, length: int) -> list[float]:
     if not isinstance(value, (list, tuple)):
         value = [value] * length
     return [float(v) for v in _fit(value, length, DEFAULT_THICKNESS)]
+
+
+def yarn_segments(up: list[list[bool]], colors: list[list[str]],
+                  warp_thickness: list[float], weft_thickness: list[float]) -> list[tuple]:
+    """Outlines (points, colour) of the visible yarn in a drawdown.
+
+    Coordinates are in cell units from the drawdown's top-left corner: each end
+    is as wide as its thickness and each pick as tall as its own. Yarn on top
+    spreads over thinner crossing yarn showing in the cells around it: a weft
+    mostly left and right, and a little up and down; a warp mostly up and
+    down, and a little left and right. Neighbouring cells look smaller.
+
+    Each outline is plus-shaped: the left/right spread spans only the cell's
+    own height and the up/down spread only its own width, so yarn never
+    reaches diagonally into a corner cell. Thinner yarn comes first, so
+    drawing in order puts thicker yarn on top.
+    """
+    picks, ends = len(up), len(up[0]) if up else 0
+    xs = [0.0, *accumulate(warp_thickness[:ends])]
+    ys = [0.0, *accumulate(weft_thickness[:picks])]
+
+    def spread(mine, theirs, room, rate):
+        """How far yarn of thickness mine spreads over thinner yarn theirs,
+        showing in a neighbouring cell that is room wide (in this direction)."""
+        return min(max(0.0, rate * (mine - theirs)), MAX_SPREAD * room)
+
+    segments = []
+    for p in range(picks):
+        for e in range(ends):
+            x0, x1, y0, y1 = xs[e], xs[e + 1], ys[p], ys[p + 1]
+            left = right = top = bottom = 0.0
+            if up[p][e]:
+                t = warp_thickness[e]
+                # Along the warp: over the pick showing above or below.
+                if p > 0 and not up[p - 1][e]:
+                    top = spread(t, weft_thickness[p - 1], weft_thickness[p - 1], YARN_SPREAD)
+                if p + 1 < picks and not up[p + 1][e]:
+                    bottom = spread(t, weft_thickness[p + 1], weft_thickness[p + 1],
+                                    YARN_SPREAD)
+                # Across the warp: over this pick where it shows beside the end.
+                if e > 0 and not up[p][e - 1]:
+                    left = spread(t, weft_thickness[p], warp_thickness[e - 1],
+                                  YARN_SPREAD_ACROSS)
+                if e + 1 < ends and not up[p][e + 1]:
+                    right = spread(t, weft_thickness[p], warp_thickness[e + 1],
+                                   YARN_SPREAD_ACROSS)
+            else:
+                t = weft_thickness[p]
+                # Along the weft: over the end showing left or right.
+                if e > 0 and up[p][e - 1]:
+                    left = spread(t, warp_thickness[e - 1], warp_thickness[e - 1], YARN_SPREAD)
+                if e + 1 < ends and up[p][e + 1]:
+                    right = spread(t, warp_thickness[e + 1], warp_thickness[e + 1],
+                                   YARN_SPREAD)
+                # Across the weft: over this end where it shows above or below the pick.
+                if p > 0 and up[p - 1][e]:
+                    top = spread(t, warp_thickness[e], weft_thickness[p - 1],
+                                 YARN_SPREAD_ACROSS)
+                if p + 1 < picks and up[p + 1][e]:
+                    bottom = spread(t, warp_thickness[e], weft_thickness[p + 1],
+                                    YARN_SPREAD_ACROSS)
+            outline = [
+                (x0, y0 - top), (x1, y0 - top), (x1, y0), (x1 + right, y0),
+                (x1 + right, y1), (x1, y1), (x1, y1 + bottom), (x0, y1 + bottom),
+                (x0, y1), (x0 - left, y1), (x0 - left, y0), (x0, y0),
+            ]
+            segments.append((t, (outline, colors[p][e])))
+    segments.sort(key=lambda s: s[0])  # stable: equal yarns keep grid order
+    return [seg for _, seg in segments]
 
 
 def format_ranges(indices: list[int]) -> str:
@@ -164,6 +242,11 @@ class Draft:
              for end, up in enumerate(row)]
             for pick, row in enumerate(self.drawdown())
         ]
+
+    def yarn_drawdown(self) -> list[tuple]:
+        """Visible yarn outlines in cell units; see yarn_segments."""
+        return yarn_segments(self.drawdown(), self.color_drawdown(),
+                             self.warp_thickness, self.weft_thickness)
 
     def to_dict(self) -> dict:
         return {
