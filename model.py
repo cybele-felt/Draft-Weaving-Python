@@ -5,21 +5,11 @@ from dataclasses import dataclass, field
 NUM_SHAFTS = 4
 DEFAULT_WARP_COLOR = "#1f3b73"
 DEFAULT_WEFT_COLOR = "#e8c872"
-# Thread thickness is relative: 1.0 is a standard thread, 2.0 twice as thick.
-DEFAULT_THICKNESS = 1.0
-MIN_THICKNESS, MAX_THICKNESS = 0.25, 4.0
 
 
 def _fit(colors: list[str], length: int, default: str) -> list[str]:
     """Trim or pad a colour list to the given length."""
     return list(colors[:length]) + [default] * (length - len(colors))
-
-
-def _thickness(value) -> float:
-    """Read a saved thickness. Drafts saved with one value per thread keep the first."""
-    if isinstance(value, list):
-        value = value[0] if value else DEFAULT_THICKNESS
-    return float(value)
 
 
 @dataclass
@@ -32,8 +22,6 @@ class Draft:
                pressed. A single int is accepted and stored as a one-item set.
     warp_colors: colour ("#rrggbb") of each warp end; padded with the default.
     weft_colors: colour of each pick; padded with the default.
-    warp_thickness: relative thickness of all warp ends (1.0 = standard).
-    weft_thickness: relative thickness of all picks.
 
     Uses a rising-shed convention: tied shafts are lifted, so the warp
     shows on the face wherever its shaft is raised.
@@ -45,8 +33,6 @@ class Draft:
     name: str = ""
     warp_colors: list[str] = field(default_factory=list)
     weft_colors: list[str] = field(default_factory=list)
-    warp_thickness: float = DEFAULT_THICKNESS
-    weft_thickness: float = DEFAULT_THICKNESS
 
     def __post_init__(self):
         self.tie_up = [set(shafts) for shafts in self.tie_up]
@@ -55,8 +41,6 @@ class Draft:
         ]
         self.warp_colors = _fit(self.warp_colors, self.num_ends, DEFAULT_WARP_COLOR)
         self.weft_colors = _fit(self.weft_colors, self.num_picks, DEFAULT_WEFT_COLOR)
-        self.warp_thickness = float(self.warp_thickness)
-        self.weft_thickness = float(self.weft_thickness)
         self.validate()
 
     @property
@@ -84,10 +68,6 @@ class Draft:
             bad = [t for t in treadles if not 1 <= t <= self.num_treadles]
             if bad:
                 raise ValueError(f"pick {p}: treadles {bad} are not in 1-{self.num_treadles}")
-        for noun, t in (("warp", self.warp_thickness), ("weft", self.weft_thickness)):
-            if not MIN_THICKNESS <= t <= MAX_THICKNESS:
-                raise ValueError(f"{noun} thickness {t:g} is not in "
-                                 f"{MIN_THICKNESS:g}-{MAX_THICKNESS:g}")
 
     def raised_shafts(self, pick: int) -> set[int]:
         """Shafts lifted on a pick (0-based index)."""
@@ -111,10 +91,7 @@ class Draft:
 
     def drawdown(self) -> list[list[bool]]:
         """Grid of picks x ends; True where the warp is on top."""
-        return [
-            [shaft in raised for shaft in self.threading]
-            for raised in (self.raised_shafts(p) for p in range(self.num_picks))
-        ]
+        return [[shaft in raised for shaft in self.threading] for raised in self.lift_plan()]
 
     def color_drawdown(self) -> list[list[str]]:
         """Grid of picks x ends giving the colour seen in each cell."""
@@ -132,8 +109,6 @@ class Draft:
             "treadling": [sorted(t) for t in self.treadling],
             "warp_colors": list(self.warp_colors),
             "weft_colors": list(self.weft_colors),
-            "warp_thickness": self.warp_thickness,
-            "weft_thickness": self.weft_thickness,
         }
 
     @classmethod
@@ -145,8 +120,6 @@ class Draft:
             name=data.get("name", ""),
             warp_colors=data.get("warp_colors", []),
             weft_colors=data.get("weft_colors", []),
-            warp_thickness=_thickness(data.get("warp_thickness", DEFAULT_THICKNESS)),
-            weft_thickness=_thickness(data.get("weft_thickness", DEFAULT_THICKNESS)),
         )
 
     def __str__(self) -> str:

@@ -6,8 +6,6 @@ Two layouts:
                plan, for a loom without a tie-up.
 """
 
-from itertools import accumulate
-
 from matplotlib.collections import PatchCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
@@ -22,28 +20,20 @@ GRID_LINE = "#9a9a9a"
 MARK = "#222222"
 
 
-def _edges(thickness: list[float]) -> list[float]:
-    """Cell boundaries, in cell units, for threads of the given thickness."""
-    return [0.0, *accumulate(thickness)]
-
-
 def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = True,
                colors: bool = True, title: str = "") -> None:
     ends, picks = draft.num_ends, draft.num_picks
     lift = layout == "lift_plan"
     right_cols = NUM_SHAFTS if lift else draft.num_treadles
-    # Warp columns and weft rows are sized by thread thickness.
-    xs = _edges([draft.warp_thickness] * ends)
-    ys = _edges([draft.weft_thickness] * picks)
 
     # Layout in cell units. x grows right, y grows down.
-    strip = 2 if colors else 0  # warp colour row plus a gap
-    thread_y = strip
+    thread_y = 2 if colors else 0  # below the warp colour row and a gap
     lower_y = thread_y + NUM_SHAFTS + 1
-    right_x = xs[-1] + 1
+    right_x = ends + 1
     weft_x = right_x + right_cols + 1
-    width = (weft_x + 1 if colors else weft_x - 1) + 3  # room for pick numbers
-    height = lower_y + ys[-1] + 2
+    num_x = (weft_x + 1 if colors else weft_x - 1) + 0.3  # pick numbers
+    width = num_x + 3
+    height = lower_y + picks + 2
     left, top = 2.0, 1.0  # shaft numbers on the left, headings on top
     header = 0.9  # inches for the title block
 
@@ -63,22 +53,9 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     ox, oy = PAGE_MARGIN + left * cell, PAGE_MARGIN + header + top * cell
     rects, fills = [], []
 
-    def rect(x0, y0, x1, y1, fill):
-        rects.append(Rectangle((ox + x0 * cell, oy + y0 * cell), (x1 - x0) * cell,
-                               (y1 - y0) * cell))
-        fills.append(fill)
-
     def box(col, row, fill):
-        rect(col, row, col + 1, row + 1, fill)
-
-    def warp_box(end, row, fill):  # one warp end's column, one unit tall
-        rect(xs[end], row, xs[end + 1], row + 1, fill)
-
-    def weft_box(col, pick, fill):  # one unit wide, one pick's row below lower_y
-        rect(col, lower_y + ys[pick], col + 1, lower_y + ys[pick + 1], fill)
-
-    def pick_mid(pick):
-        return lower_y + (ys[pick] + ys[pick + 1]) / 2
+        rects.append(Rectangle((ox + col * cell, oy + row * cell), cell, cell))
+        fills.append(fill)
 
     def text(col, row, s, **kw):
         kw.setdefault("ha", "center")
@@ -92,33 +69,31 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     # Warp colours and threading
     if colors:
         for c, color in enumerate(draft.warp_colors):
-            warp_box(c, 0, color)
+            box(c, 0, color)
         heading(0, 0, "Warp colours")
     for r in range(NUM_SHAFTS):
         shaft = NUM_SHAFTS - r
         text(-0.8, thread_y + r + 0.5, str(shaft))
         for c, s in enumerate(draft.threading):
-            warp_box(c, thread_y + r, MARK if s == shaft else "white")
+            box(c, thread_y + r, MARK if s == shaft else "white")
     heading(0, thread_y, "Threading")
     for c in range(3, ends, 4):
-        text((xs[c] + xs[c + 1]) / 2, thread_y + NUM_SHAFTS + 0.5, str(c + 1),
-             fontsize=font * 0.8, color="#555")
+        text(c + 0.5, thread_y + NUM_SHAFTS + 0.5, str(c + 1), fontsize=font * 0.8, color="#555")
 
     # Drawdown
     for r, row in enumerate(draft.color_drawdown()):
         for c, color in enumerate(row):
-            rect(xs[c], lower_y + ys[r], xs[c + 1], lower_y + ys[r + 1], color)
-    text(0, lower_y + ys[-1] + 0.8, "Drawdown", ha="left", fontsize=font + 1, weight="bold")
+            box(c, lower_y + r, color)
+    text(0, lower_y + picks + 0.8, "Drawdown", ha="left", fontsize=font + 1, weight="bold")
 
     # Right-hand side: tie-up + treadling, or the merged lift plan
     if lift:
-        plan = draft.lift_plan(lowered=lowered)
-        for r, shafts in enumerate(plan):
+        for r, shafts in enumerate(draft.lift_plan(lowered=lowered)):
             for c in range(NUM_SHAFTS):
                 marked = c + 1 in shafts
-                weft_box(right_x + c, r, MARK if marked else "white")
-                if marked and cell * (ys[r + 1] - ys[r]) >= 0.12:
-                    text(right_x + c + 0.5, pick_mid(r), str(c + 1), color="white",
+                box(right_x + c, lower_y + r, MARK if marked else "white")
+                if marked and cell >= 0.12:
+                    text(right_x + c + 0.5, lower_y + r + 0.5, str(c + 1), color="white",
                          fontsize=font * 0.85)
         for c in range(NUM_SHAFTS):
             text(right_x + c + 0.5, lower_y - 0.5, str(c + 1))
@@ -134,21 +109,19 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
         heading(right_x, thread_y, "Tie-up")
         for r, pressed in enumerate(draft.treadling):
             for c in range(draft.num_treadles):
-                weft_box(right_x + c, r, MARK if c + 1 in pressed else "white")
+                box(right_x + c, lower_y + r, MARK if c + 1 in pressed else "white")
         for c in range(draft.num_treadles):
-            text(right_x + c + 0.5, lower_y + ys[-1] + 0.6, str(c + 1))
+            text(right_x + c + 0.5, lower_y + picks + 0.6, str(c + 1))
         heading(right_x, lower_y, "Treadling")
         note = "Rising shed: tied shafts are lifted. Treadle from pick 1 at the top."
 
     # Weft colours and pick numbers
     if colors:
         for r, color in enumerate(draft.weft_colors):
-            weft_box(weft_x, r, color)
+            box(weft_x, lower_y + r, color)
         heading(weft_x, lower_y, "Weft")
-    num_x = (weft_x + 1 if colors else weft_x - 1) + 0.3
     for r in range(picks):
-        if ys[r + 1] - ys[r] >= 0.5:  # skip numbers on picks too thin to label
-            text(num_x, pick_mid(r), str(r + 1), ha="left", fontsize=font * 0.8, color="#555")
+        text(num_x, lower_y + r + 0.5, str(r + 1), ha="left", fontsize=font * 0.8, color="#555")
 
     ax.add_collection(PatchCollection(rects, facecolors=fills, edgecolors=GRID_LINE,
                                       linewidths=0.4))
@@ -156,8 +129,6 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     summary = f"{ends} ends × {picks} picks, {NUM_SHAFTS} shafts"
     if not lift:
         summary += f", {draft.num_treadles} treadles"
-    summary += (f" · warp thickness {draft.warp_thickness:g},"
-                f" weft thickness {draft.weft_thickness:g}")
     ax.text(PAGE_MARGIN, PAGE_MARGIN, title or "Weaving draft", fontsize=14, weight="bold",
             va="top")
     ax.text(PAGE_MARGIN, PAGE_MARGIN + 0.28, summary, fontsize=9, va="top", color="#444")
