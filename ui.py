@@ -1,13 +1,15 @@
 """Tkinter editor for a 4-shaft weaving draft.
 
 Click (or drag) in the threading, tie-up and treadling grids to edit the
-draft, colour warp ends and picks from the colour bar, set the warp and weft
-thickness, then press Run to weave the drawdown. A thicker warp is drawn as
-wider columns and a thicker weft as taller rows.
+draft, colour and size warp ends and picks from the colour and thickness bars,
+then press Run to weave the drawdown. A thicker end is drawn as a wider column
+and a thicker pick as a taller row.
 """
 
 import json
 import os
+from bisect import bisect_right
+from itertools import accumulate
 import re
 import subprocess
 import sys
@@ -16,7 +18,7 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from model import (DEFAULT_THICKNESS, DEFAULT_WARP_COLOR, DEFAULT_WEFT_COLOR, MAX_THICKNESS,
-                   MIN_THICKNESS, NUM_SHAFTS, Draft)
+                   MIN_THICKNESS, NUM_SHAFTS, Draft, thickness_summary)
 from presets import PRESETS
 from print_draft import render_pdf
 
@@ -58,7 +60,7 @@ def parse_ranges(text: str, count: int, noun: str) -> list[int]:
             raise ValueError(f"{noun} {end} is beyond the last {noun} ({count}).")
         indices.extend(range(start - 1, end, step))
     if not indices:
-        raise ValueError(f"Enter the {noun}s to colour, e.g. 1-4, 9 or all.")
+        raise ValueError(f"Enter which {noun}s, e.g. 1-4, 9 or all.")
     return indices
 
 
@@ -157,19 +159,23 @@ class DraftEditor(tk.Tk):
         bar.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Label(bar, text="Thickness").pack(side=tk.LEFT, padx=(8, 4))
-        self.warp_thickness_var = tk.StringVar()
-        self.weft_thickness_var = tk.StringVar()
-        for label, var in (("Warp", self.warp_thickness_var),
-                           ("Weft", self.weft_thickness_var)):
-            ttk.Label(bar, text=label).pack(side=tk.LEFT, padx=(10, 2))
-            spin = ttk.Spinbox(bar, from_=MIN_THICKNESS, to=MAX_THICKNESS, increment=0.25,
-                               width=5, textvariable=var, command=self.set_thickness)
-            spin.pack(side=tk.LEFT)
-            spin.bind("<Return>", lambda e: self.set_thickness())
-            spin.bind("<FocusOut>", lambda e: self.set_thickness())
+        self.thickness_var = tk.StringVar(value=f"{DEFAULT_THICKNESS:g}")
+        ttk.Spinbox(bar, from_=MIN_THICKNESS, to=MAX_THICKNESS, increment=0.25, width=5,
+                    textvariable=self.thickness_var).pack(side=tk.LEFT)
 
-        ttk.Label(bar, text=f"1 = standard thread, {MIN_THICKNESS:g}–{MAX_THICKNESS:g}. "
-                            "Applies to all warp ends / all picks.",
+        self.warp_thick_range = tk.StringVar()
+        self.weft_thick_range = tk.StringVar()
+        for label, var, command in (
+            ("Warp ends", self.warp_thick_range, self.thicken_warp),
+            ("Weft picks", self.weft_thick_range, self.thicken_weft),
+        ):
+            ttk.Label(bar, text=label).pack(side=tk.LEFT, padx=(14, 2))
+            entry = ttk.Entry(bar, textvariable=var, width=14)
+            entry.pack(side=tk.LEFT)
+            entry.bind("<Return>", lambda e, cmd=command: cmd())
+            ttk.Button(bar, text="Apply", command=command).pack(side=tk.LEFT, padx=(2, 0))
+
+        ttk.Label(bar, text=f"1 = standard thread, {MIN_THICKNESS:g}–{MAX_THICKNESS:g}",
                   foreground="#777").pack(side=tk.LEFT, padx=(10, 0))
 
     def _build_canvas(self):
@@ -189,21 +195,28 @@ class DraftEditor(tk.Tk):
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, "_paint_value", None))
 
-    # Regions: top-left corner, columns, rows, and cell width and height.
-    # Warp columns are widened by the warp thickness, weft rows by the weft's.
+    # Each region is (column edges, row edges) in canvas coordinates. Warp
+    # columns are as wide as their end's thickness, weft rows as tall as their pick's.
     def _origins(self):
-        ends, treadles, picks = len(self.threading), len(self.tie_up), len(self.treadling)
-        warp_w, weft_h = CELL * self.warp_thickness, CELL * self.weft_thickness
-        right_x = MARGIN + ends * warp_w + GAP
+        treadles = len(self.tie_up)
+
+        def edges(start, sizes):
+            return [start, *(start + CELL * t for t in accumulate(sizes))]
+
+        def even(start, count):
+            return edges(start, [1] * count)
+
+        warp_x = edges(MARGIN, self.warp_thickness)
+        right_x = warp_x[-1] + GAP
         thread_y = MARGIN + CELL + GAP
-        lower_y = thread_y + NUM_SHAFTS * CELL + GAP
+        weft_y = edges(thread_y + NUM_SHAFTS * CELL + GAP, self.weft_thickness)
         return {
-            "warp_colors": (MARGIN, MARGIN, ends, 1, warp_w, CELL),
-            "threading": (MARGIN, thread_y, ends, NUM_SHAFTS, warp_w, CELL),
-            "tie_up": (right_x, thread_y, treadles, NUM_SHAFTS, CELL, CELL),
-            "drawdown": (MARGIN, lower_y, ends, picks, warp_w, weft_h),
-            "treadling": (right_x, lower_y, treadles, picks, CELL, weft_h),
-            "weft_colors": (right_x + treadles * CELL + GAP, lower_y, 1, picks, CELL, weft_h),
+            "warp_colors": (warp_x, even(MARGIN, 1)),
+            "threading": (warp_x, even(thread_y, NUM_SHAFTS)),
+            "tie_up": (even(right_x, treadles), even(thread_y, NUM_SHAFTS)),
+            "drawdown": (warp_x, weft_y),
+            "treadling": (even(right_x, treadles), weft_y),
+            "weft_colors": (even(right_x + treadles * CELL + GAP, 1), weft_y),
         }
 
     # ---------- state ----------
@@ -214,8 +227,8 @@ class DraftEditor(tk.Tk):
         self.treadling = [set(t) for t in draft.treadling]
         self.warp_colors = list(draft.warp_colors)
         self.weft_colors = list(draft.weft_colors)
-        self.warp_thickness = draft.warp_thickness
-        self.weft_thickness = draft.weft_thickness
+        self.warp_thickness = list(draft.warp_thickness)
+        self.weft_thickness = list(draft.weft_thickness)
         self._sync_spinboxes()
         self.run()
 
@@ -228,8 +241,6 @@ class DraftEditor(tk.Tk):
         self.ends_var.set(len(self.threading))
         self.treadles_var.set(len(self.tie_up))
         self.picks_var.set(len(self.treadling))
-        self.warp_thickness_var.set(f"{self.warp_thickness:g}")
-        self.weft_thickness_var.set(f"{self.weft_thickness:g}")
 
     def resize(self):
         try:
@@ -249,9 +260,10 @@ class DraftEditor(tk.Tk):
         self.treadling = [
             {t for t in pick if t <= treadles} for pick in self.treadling[:picks]
         ] + [set() for _ in range(picks - len(self.treadling))]
-        # The model trims or pads the colour lists to match.
+        # The model trims or pads the colour and thickness lists to match.
         draft = self.current_draft()
         self.warp_colors, self.weft_colors = draft.warp_colors, draft.weft_colors
+        self.warp_thickness, self.weft_thickness = draft.warp_thickness, draft.weft_thickness
         self._sync_spinboxes()
         self.mark_stale()
 
@@ -261,8 +273,8 @@ class DraftEditor(tk.Tk):
         self.threading = [i % NUM_SHAFTS + 1 for i in range(len(self.threading))]
         self.warp_colors = [DEFAULT_WARP_COLOR] * len(self.threading)
         self.weft_colors = [DEFAULT_WEFT_COLOR] * len(self.treadling)
-        self.warp_thickness = self.weft_thickness = DEFAULT_THICKNESS
-        self._sync_spinboxes()
+        self.warp_thickness = [DEFAULT_THICKNESS] * len(self.threading)
+        self.weft_thickness = [DEFAULT_THICKNESS] * len(self.treadling)
         self.mark_stale()
 
     def mark_stale(self):
@@ -290,55 +302,59 @@ class DraftEditor(tk.Tk):
             self.brush = color
             self._paint_swatch()
 
-    def _set_threads(self, colors, text, noun):
+    def _set_threads(self, values, text, noun, value, what):
+        """Set value on the threads listed in text; return False on bad input."""
         try:
-            indices = parse_ranges(text, len(colors), noun)
+            indices = parse_ranges(text, len(values), noun)
         except ValueError as err:
-            messagebox.showerror("Can't apply colour", str(err))
-            return
+            messagebox.showerror(f"Can't apply {what}", str(err))
+            return False
         for i in indices:
-            colors[i] = self.brush
-        self.mark_stale()
+            values[i] = value
+        return True
 
     def color_warp(self):
-        self._set_threads(self.warp_colors, self.warp_range.get(), "end")
+        if self._set_threads(self.warp_colors, self.warp_range.get(), "end", self.brush, "colour"):
+            self.mark_stale()
 
     def color_weft(self):
-        self._set_threads(self.weft_colors, self.weft_range.get(), "pick")
+        if self._set_threads(self.weft_colors, self.weft_range.get(), "pick", self.brush, "colour"):
+            self.mark_stale()
 
     # ---------- thread thickness ----------
 
-    def set_thickness(self):
-        """Apply the warp and weft thickness boxes to every end and pick."""
-        values = []
-        for var, current in ((self.warp_thickness_var, self.warp_thickness),
-                             (self.weft_thickness_var, self.weft_thickness)):
-            try:
-                value = float(var.get())
-            except ValueError:
-                value = None
-            if value is None or not MIN_THICKNESS <= value <= MAX_THICKNESS:
-                self._sync_spinboxes()
-                messagebox.showerror(
-                    "Invalid thickness",
-                    f"Thickness must be a number from {MIN_THICKNESS:g} to {MAX_THICKNESS:g} "
-                    f"(1 = a standard thread).")
-                return
-            values.append(value)
-        if values == [self.warp_thickness, self.weft_thickness]:
-            return
-        self.warp_thickness, self.weft_thickness = values
+    def _thickness_value(self):
+        try:
+            value = float(self.thickness_var.get())
+        except ValueError:
+            value = None
+        if value is None or not MIN_THICKNESS <= value <= MAX_THICKNESS:
+            messagebox.showerror(
+                "Invalid thickness",
+                f"Thickness must be a number from {MIN_THICKNESS:g} to {MAX_THICKNESS:g} "
+                f"(1 = a standard thread).")
+            return None
+        return value
+
+    def _thicken(self, values, text, noun):
+        value = self._thickness_value()
         # Thickness changes the drawdown's proportions, not its colours, so no re-Run.
-        self.redraw()
+        if value is not None and self._set_threads(values, text, noun, value, "thickness"):
+            self.redraw()
+
+    def thicken_warp(self):
+        self._thicken(self.warp_thickness, self.warp_thick_range.get(), "end")
+
+    def thicken_weft(self):
+        self._thicken(self.weft_thickness, self.weft_thick_range.get(), "pick")
 
     # ---------- editing ----------
 
     def _hit(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-        for name, (ox, oy, cols, rows, w, h) in self._origins().items():
-            col, row = int((x - ox) // w), int((y - oy) // h)
-            if x >= ox and y >= oy and col < cols and row < rows:
-                return name, col, row
+        for name, (xs, ys) in self._origins().items():
+            if xs[0] <= x < xs[-1] and ys[0] <= y < ys[-1]:
+                return name, bisect_right(xs, x) - 1, bisect_right(ys, y) - 1
         return None
 
     def on_press(self, event):
@@ -389,9 +405,9 @@ class DraftEditor(tk.Tk):
     # ---------- drawing ----------
 
     def _cell(self, region, col, row, fill):
-        ox, oy, _, _, w, h = region
-        x, y = ox + col * w, oy + row * h
-        self.canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=GRID_LINE)
+        xs, ys = region
+        self.canvas.create_rectangle(xs[col], ys[row], xs[col + 1], ys[row + 1],
+                                     fill=fill, outline=GRID_LINE)
 
     def _fade(self, color, amount=0.65):
         """Blend a colour toward white."""
@@ -399,8 +415,8 @@ class DraftEditor(tk.Tk):
         return "#%02x%02x%02x" % tuple(int(v + (255 - v) * amount) for v in (r, g, b))
 
     def _label(self, name, text):
-        ox, oy, *_ = self._origins()[name]
-        self.canvas.create_text(ox, oy - 9, text=text, anchor="w")
+        xs, ys = self._origins()[name]
+        self.canvas.create_text(xs[0], ys[0] - 9, text=text, anchor="w")
 
     def redraw(self):
         c = self.canvas
@@ -413,7 +429,7 @@ class DraftEditor(tk.Tk):
         self._label("warp_colors", "Warp colours")
 
         r = o["threading"]
-        ox, oy = r[:2]
+        ox, oy = r[0][0], r[1][0]
         for row in range(NUM_SHAFTS):
             shaft = NUM_SHAFTS - row
             c.create_text(ox - 10, oy + row * CELL + CELL / 2, text=str(shaft))
@@ -428,12 +444,13 @@ class DraftEditor(tk.Tk):
         self._label("tie_up", "Tie-up")
 
         r = o["treadling"]
-        ox, oy, treadles, picks, _, h = r
+        ox, bottom = r[0][0], r[1][-1]
+        treadles = len(self.tie_up)
         for row, pressed in enumerate(self.treadling):
             for col in range(treadles):
                 self._cell(r, col, row, MARK if col + 1 in pressed else EMPTY)
         for col in range(treadles):
-            c.create_text(ox + col * CELL + CELL / 2, oy + picks * h + 10, text=str(col + 1))
+            c.create_text(ox + col * CELL + CELL / 2, bottom + 10, text=str(col + 1))
         self._label("treadling", "Treadling")
 
         r = o["weft_colors"]
@@ -442,7 +459,8 @@ class DraftEditor(tk.Tk):
         self._label("weft_colors", "Weft")
 
         r = o["drawdown"]
-        ox, oy, ends, picks, _, h = r
+        ox, bottom = r[0][0], r[1][-1]
+        ends, picks = len(self.threading), len(self.treadling)
         # A stale drawdown keeps the last result, faded, until Run is pressed.
         if self.result is not None:
             faded = {}
@@ -451,16 +469,17 @@ class DraftEditor(tk.Tk):
                     if self.stale:
                         color = faded.setdefault(color, self._fade(color))
                     self._cell(r, col, row, color)
-        thickness = (f"warp thickness {self.warp_thickness:g}, "
-                     f"weft thickness {self.weft_thickness:g}")
-        c.create_text(ox, oy + picks * h + 10, text=f"Drawdown  ·  {thickness}", anchor="w")
+        c.create_text(ox, bottom + 10, text="Drawdown", anchor="w")
+        summary = (f"Warp thickness: {thickness_summary(self.warp_thickness, 'end')}\n"
+                   f"Weft thickness: {thickness_summary(self.weft_thickness, 'pick')}")
+        c.create_text(ox, bottom + 24, text=summary, anchor="nw", fill="#444",
+                      width=max(r[0][-1] - ox, 360))
         if self.stale:
             self.status.configure(text="Draft changed — press Run (⌘R) to update the drawdown.",
                                   foreground=STALE_TEXT)
         else:
             self.status.configure(
-                text=f"{ends} ends × {picks} picks, {treadles} treadles, {thickness}. "
-                     "Rising shed.",
+                text=f"{ends} ends × {picks} picks, {treadles} treadles. Rising shed.",
                 foreground="")
 
         _, _, x2, y2 = c.bbox("all")

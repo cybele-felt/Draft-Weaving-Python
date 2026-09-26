@@ -10,16 +10,55 @@ DEFAULT_THICKNESS = 1.0
 MIN_THICKNESS, MAX_THICKNESS = 0.25, 4.0
 
 
-def _fit(colors: list[str], length: int, default: str) -> list[str]:
-    """Trim or pad a colour list to the given length."""
-    return list(colors[:length]) + [default] * (length - len(colors))
+def _fit(values: list, length: int, default) -> list:
+    """Trim or pad a per-thread list to the given length."""
+    return list(values[:length]) + [default] * (length - len(values))
 
 
-def _thickness(value) -> float:
-    """Read a saved thickness. Drafts saved with one value per thread keep the first."""
-    if isinstance(value, list):
-        value = value[0] if value else DEFAULT_THICKNESS
-    return float(value)
+def _thicknesses(value, length: int) -> list[float]:
+    """Per-thread thicknesses. A single number (older drafts) applies to every thread."""
+    if not isinstance(value, (list, tuple)):
+        value = [value] * length
+    return [float(v) for v in _fit(value, length, DEFAULT_THICKNESS)]
+
+
+def format_ranges(indices: list[int]) -> str:
+    """Write 0-based indices as 1-based ranges, e.g. "1-4, 9, 13-23/2"."""
+    nums = sorted(i + 1 for i in indices)
+    parts, i = [], 0
+    while i < len(nums):
+        j = i
+        if i + 1 < len(nums):
+            step = nums[i + 1] - nums[i]
+            while j + 1 < len(nums) and nums[j + 1] - nums[j] == step:
+                j += 1
+            # A stepped run only reads well with at least three threads.
+            if step > 1 and j - i < 2:
+                j = i
+        if j == i:
+            parts.append(str(nums[i]))
+        else:
+            step = nums[i + 1] - nums[i]
+            parts.append(f"{nums[i]}-{nums[j]}" + (f"/{step}" if step > 1 else ""))
+        i = j + 1
+    return ", ".join(parts)
+
+
+def thickness_summary(values: list[float], noun: str) -> str:
+    """Describe per-thread thicknesses, e.g. "2 on ends 5-8; 1 on all other ends"."""
+    groups: dict[float, list[int]] = {}
+    for i, v in enumerate(values):
+        groups.setdefault(v, []).append(i)
+    if len(groups) <= 1:
+        return f"{values[0]:g} on all {noun}s" if values else f"no {noun}s"
+    # List the exceptions, then the most common thickness as "all other".
+    common = max(groups, key=lambda v: len(groups[v]))
+    parts = [
+        f"{v:g} on {noun if len(idx) == 1 else noun + 's'} {format_ranges(idx)}"
+        for v, idx in sorted(groups.items()) if v != common
+    ]
+    parts.append(f"{common:g} on all other {noun}s")
+    return "; ".join(parts)
 
 
 @dataclass
@@ -32,8 +71,9 @@ class Draft:
                pressed. A single int is accepted and stored as a one-item set.
     warp_colors: colour ("#rrggbb") of each warp end; padded with the default.
     weft_colors: colour of each pick; padded with the default.
-    warp_thickness: relative thickness of all warp ends (1.0 = standard).
-    weft_thickness: relative thickness of all picks.
+    warp_thickness: relative thickness of each warp end (1.0 = standard);
+                    padded with the default.
+    weft_thickness: relative thickness of each pick.
 
     Uses a rising-shed convention: tied shafts are lifted, so the warp
     shows on the face wherever its shaft is raised.
@@ -45,8 +85,8 @@ class Draft:
     name: str = ""
     warp_colors: list[str] = field(default_factory=list)
     weft_colors: list[str] = field(default_factory=list)
-    warp_thickness: float = DEFAULT_THICKNESS
-    weft_thickness: float = DEFAULT_THICKNESS
+    warp_thickness: list[float] = field(default_factory=list)
+    weft_thickness: list[float] = field(default_factory=list)
 
     def __post_init__(self):
         self.tie_up = [set(shafts) for shafts in self.tie_up]
@@ -55,8 +95,8 @@ class Draft:
         ]
         self.warp_colors = _fit(self.warp_colors, self.num_ends, DEFAULT_WARP_COLOR)
         self.weft_colors = _fit(self.weft_colors, self.num_picks, DEFAULT_WEFT_COLOR)
-        self.warp_thickness = float(self.warp_thickness)
-        self.weft_thickness = float(self.weft_thickness)
+        self.warp_thickness = _thicknesses(self.warp_thickness, self.num_ends)
+        self.weft_thickness = _thicknesses(self.weft_thickness, self.num_picks)
         self.validate()
 
     @property
@@ -84,10 +124,11 @@ class Draft:
             bad = [t for t in treadles if not 1 <= t <= self.num_treadles]
             if bad:
                 raise ValueError(f"pick {p}: treadles {bad} are not in 1-{self.num_treadles}")
-        for noun, t in (("warp", self.warp_thickness), ("weft", self.weft_thickness)):
-            if not MIN_THICKNESS <= t <= MAX_THICKNESS:
-                raise ValueError(f"{noun} thickness {t:g} is not in "
-                                 f"{MIN_THICKNESS:g}-{MAX_THICKNESS:g}")
+        for noun, values in (("end", self.warp_thickness), ("pick", self.weft_thickness)):
+            for i, t in enumerate(values, 1):
+                if not MIN_THICKNESS <= t <= MAX_THICKNESS:
+                    raise ValueError(f"{noun} {i}: thickness {t:g} is not in "
+                                     f"{MIN_THICKNESS:g}-{MAX_THICKNESS:g}")
 
     def raised_shafts(self, pick: int) -> set[int]:
         """Shafts lifted on a pick (0-based index)."""
@@ -132,8 +173,8 @@ class Draft:
             "treadling": [sorted(t) for t in self.treadling],
             "warp_colors": list(self.warp_colors),
             "weft_colors": list(self.weft_colors),
-            "warp_thickness": self.warp_thickness,
-            "weft_thickness": self.weft_thickness,
+            "warp_thickness": list(self.warp_thickness),
+            "weft_thickness": list(self.weft_thickness),
         }
 
     @classmethod
@@ -145,8 +186,8 @@ class Draft:
             name=data.get("name", ""),
             warp_colors=data.get("warp_colors", []),
             weft_colors=data.get("weft_colors", []),
-            warp_thickness=_thickness(data.get("warp_thickness", DEFAULT_THICKNESS)),
-            weft_thickness=_thickness(data.get("weft_thickness", DEFAULT_THICKNESS)),
+            warp_thickness=data.get("warp_thickness", []),
+            weft_thickness=data.get("weft_thickness", []),
         )
 
     def __str__(self) -> str:

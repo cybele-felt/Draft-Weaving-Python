@@ -12,7 +12,7 @@ from matplotlib.collections import PatchCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-from model import NUM_SHAFTS, Draft
+from model import NUM_SHAFTS, Draft, thickness_summary
 
 PAGE_SHORT, PAGE_LONG = 8.27, 11.69  # A4, inches
 PAGE_MARGIN = 0.5
@@ -33,8 +33,8 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     lift = layout == "lift_plan"
     right_cols = NUM_SHAFTS if lift else draft.num_treadles
     # Warp columns and weft rows are sized by thread thickness.
-    xs = _edges([draft.warp_thickness] * ends)
-    ys = _edges([draft.weft_thickness] * picks)
+    xs = _edges(draft.warp_thickness)
+    ys = _edges(draft.weft_thickness)
 
     # Layout in cell units. x grows right, y grows down.
     strip = 2 if colors else 0  # warp colour row plus a gap
@@ -46,12 +46,13 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     height = lower_y + ys[-1] + 2
     left, top = 2.0, 1.0  # shaft numbers on the left, headings on top
     header = 0.9  # inches for the title block
+    footer = 0.8  # inches for the thickness summary and note
 
-    units_w, units_h = width + left, height + top + 2  # +2 for the note at the bottom
+    units_w, units_h = width + left, height + top
     landscape = units_w > units_h
     page_w, page_h = (PAGE_LONG, PAGE_SHORT) if landscape else (PAGE_SHORT, PAGE_LONG)
     cell = min(MAX_CELL, (page_w - 2 * PAGE_MARGIN) / units_w,
-               (page_h - 2 * PAGE_MARGIN - header) / units_h)
+               (page_h - 2 * PAGE_MARGIN - header - footer) / units_h)
     font = max(4.0, min(9.0, cell * 72 * 0.6))
 
     fig = Figure(figsize=(page_w, page_h))
@@ -156,12 +157,15 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     summary = f"{ends} ends × {picks} picks, {NUM_SHAFTS} shafts"
     if not lift:
         summary += f", {draft.num_treadles} treadles"
-    summary += (f" · warp thickness {draft.warp_thickness:g},"
-                f" weft thickness {draft.weft_thickness:g}")
     ax.text(PAGE_MARGIN, PAGE_MARGIN, title or "Weaving draft", fontsize=14, weight="bold",
             va="top")
     ax.text(PAGE_MARGIN, PAGE_MARGIN + 0.28, summary, fontsize=9, va="top", color="#444")
-    ax.text(PAGE_MARGIN, oy + (height + 0.8) * cell, note, fontsize=8, va="top",
-            color="#444", wrap=True)
+    footer_lines = [
+        f"Warp thickness: {thickness_summary(draft.warp_thickness, 'end')}",
+        f"Weft thickness: {thickness_summary(draft.weft_thickness, 'pick')}",
+        note,
+    ]
+    ax.text(PAGE_MARGIN, oy + height * cell + 0.15, "\n".join(footer_lines), fontsize=8,
+            va="top", color="#444", wrap=True, linespacing=1.5)
 
     fig.savefig(path)
