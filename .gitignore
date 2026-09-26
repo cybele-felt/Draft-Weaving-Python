@@ -1,0 +1,16 @@
+# Mac system files
+.DS_Store
+
+# Python compiled files (recreated automatically when you run the code)
+__pycache__/
+*.pyc
+
+# Python virtual environments
+.venv/
+venv/
+
+# Editor backup files
+*~
+
+# Secrets
+.env
