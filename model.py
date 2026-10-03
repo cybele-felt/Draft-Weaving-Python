@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 NUM_SHAFTS = 4
 DEFAULT_WARP_COLOR = "#1f3b73"
 DEFAULT_WEFT_COLOR = "#e8c872"
+GROUP_SIZE = 4  # warp ends are marked off in groups of four
 
 
 def _fit(colors: list[str], length: int, default: str) -> list[str]:

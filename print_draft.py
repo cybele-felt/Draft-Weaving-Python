@@ -6,11 +6,13 @@ Two layouts:
                plan, for a loom without a tie-up.
 """
 
-from matplotlib.collections import PatchCollection
+from datetime import date
+
+from matplotlib.collections import LineCollection, PatchCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-from model import NUM_SHAFTS, Draft
+from model import GROUP_SIZE, NUM_SHAFTS, Draft
 
 PAGE_SHORT, PAGE_LONG = 8.27, 11.69  # A4, inches
 PAGE_MARGIN = 0.5
@@ -18,10 +20,13 @@ MAX_CELL = 0.22  # inches
 
 GRID_LINE = "#9a9a9a"
 MARK = "#222222"
+GROUP_LINE = ("#6e6e6e", 1.0)  # colour and width (points) after every fourth end
+GUIDE_LINE = ("#000000", 1.6)  # lines chosen by the user
 
 
 def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = True,
-               colors: bool = True, title: str = "") -> None:
+               colors: bool = True, title: str = "", v_lines=(), h_lines=()) -> None:
+    """v_lines and h_lines are the ends and picks that guide lines follow."""
     ends, picks = draft.num_ends, draft.num_picks
     lift = layout == "lift_plan"
     right_cols = NUM_SHAFTS if lift else draft.num_treadles
@@ -36,12 +41,13 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     height = lower_y + picks + 2
     left, top = 2.0, 1.0  # shaft numbers on the left, headings on top
     header = 0.9  # inches for the title block
+    footer = 0.3  # inches for the print date
 
     units_w, units_h = width + left, height + top + 2  # +2 for the note at the bottom
     landscape = units_w > units_h
     page_w, page_h = (PAGE_LONG, PAGE_SHORT) if landscape else (PAGE_SHORT, PAGE_LONG)
     cell = min(MAX_CELL, (page_w - 2 * PAGE_MARGIN) / units_w,
-               (page_h - 2 * PAGE_MARGIN - header) / units_h)
+               (page_h - 2 * PAGE_MARGIN - header - footer) / units_h)
     font = max(4.0, min(9.0, cell * 72 * 0.6))
 
     fig = Figure(figsize=(page_w, page_h))
@@ -126,6 +132,27 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     ax.add_collection(PatchCollection(rects, facecolors=fills, edgecolors=GRID_LINE,
                                       linewidths=0.4))
 
+    # Vertical lines run through the warp colours, threading and drawdown;
+    # horizontal lines through the drawdown, treadling or plan, and weft colours.
+    def page(x, y):
+        return ox + x * cell, oy + y * cell
+
+    columns = [(thread_y, thread_y + NUM_SHAFTS), (lower_y, lower_y + picks)]
+    rows = [(0, ends), (right_x, right_x + right_cols)]
+    if colors:
+        columns.append((0, 1))
+        rows.append((weft_x, weft_x + 1))
+    groups = range(GROUP_SIZE, ends, GROUP_SIZE)
+    for lines, vertical, (color, width) in ((groups, True, GROUP_LINE),
+                                            (v_lines, True, GUIDE_LINE),
+                                            (h_lines, False, GUIDE_LINE)):
+        if vertical:
+            segments = [[page(n, y0), page(n, y1)] for n in lines for y0, y1 in columns]
+        else:
+            segments = [[page(x0, lower_y + n), page(x1, lower_y + n)]
+                        for n in lines for x0, x1 in rows]
+        ax.add_collection(LineCollection(segments, colors=color, linewidths=width))
+
     summary = f"{ends} ends × {picks} picks, {NUM_SHAFTS} shafts"
     if not lift:
         summary += f", {draft.num_treadles} treadles"
@@ -134,5 +161,8 @@ def render_pdf(draft: Draft, path: str, layout: str = "tie_up", lowered: bool = 
     ax.text(PAGE_MARGIN, PAGE_MARGIN + 0.28, summary, fontsize=9, va="top", color="#444")
     ax.text(PAGE_MARGIN, oy + (height + 0.8) * cell, note, fontsize=8, va="top",
             color="#444", wrap=True)
+    today = date.today()
+    ax.text(PAGE_MARGIN, page_h - PAGE_MARGIN, f"Printed {today.day} {today:%B %Y}",
+            fontsize=8, va="bottom", color="#444")
 
     fig.savefig(path)

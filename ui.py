@@ -2,11 +2,13 @@
 
 Click (or drag) in the threading, tie-up and treadling grids to edit the
 draft, colour warp ends and picks from the colour bar, then press Run to
-weave the drawdown.
+weave the drawdown. Darker lines mark every fourth warp end, and the lines bar
+adds your own guide lines after chosen ends and picks.
 """
 
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -14,7 +16,7 @@ import tempfile
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
-from model import DEFAULT_WARP_COLOR, DEFAULT_WEFT_COLOR, NUM_SHAFTS, Draft
+from model import DEFAULT_WARP_COLOR, DEFAULT_WEFT_COLOR, GROUP_SIZE, NUM_SHAFTS, Draft
 from presets import PRESETS
 from print_draft import render_pdf
 
@@ -26,8 +28,11 @@ GRID_LINE = "#b0b0b0"
 EMPTY = "#ffffff"
 MARK = "#222222"
 STALE_TEXT = "#a03030"
+GROUP_LINE = ("#6e6e6e", 2)  # colour and width of the line after every fourth end
+GUIDE_LINE = ("#000000", 3)  # lines added by the user
 
 DEFAULT_PRESET = "Twill 2/2 right-hand"
+CUSTOM_NAME = "Custom"  # shown once the threading, tie-up or treadling is edited
 
 _RANGE = re.compile(r"^(\d+)(?:-(\d+)(?:/(\d+))?)?$")
 
@@ -66,12 +71,15 @@ class DraftEditor(tk.Tk):
         self.title("4-Shaft Draft Designer")
 
         self.brush = "#b8322a"  # colour applied to threads
+        # Guide lines, stored as the end or pick number each line follows.
+        self.v_lines, self.h_lines = set(), set()
         self.result = None  # colour grid from the last Run
         self.stale = True
         self._paint_value = None  # value applied while dragging
 
         self._build_controls()
         self._build_color_bar()
+        self._build_lines_bar()
         self._build_canvas()
         self.load_draft(Draft(**PRESETS[DEFAULT_PRESET]))
 
@@ -149,6 +157,28 @@ class DraftEditor(tk.Tk):
         ttk.Label(bar, text="e.g. 1-4, 9, 13-24/2 or all", foreground="#777").pack(
             side=tk.LEFT, padx=(10, 0))
 
+    def _build_lines_bar(self):
+        bar = ttk.Frame(self, padding=(6, 0, 6, 6))
+        bar.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(bar, text="Lines").pack(side=tk.LEFT, padx=(8, 4))
+        self.v_lines_range = tk.StringVar()
+        self.h_lines_range = tk.StringVar()
+        for label, var, command in (
+            ("Vertical after ends", self.v_lines_range, self.add_v_lines),
+            ("Horizontal after picks", self.h_lines_range, self.add_h_lines),
+        ):
+            ttk.Label(bar, text=label).pack(side=tk.LEFT, padx=(14, 2))
+            entry = ttk.Entry(bar, textvariable=var, width=12)
+            entry.pack(side=tk.LEFT)
+            entry.bind("<Return>", lambda e, cmd=command: cmd())
+            ttk.Button(bar, text="Add", command=command).pack(side=tk.LEFT, padx=(2, 0))
+
+        ttk.Button(bar, text="Clear lines", command=self.clear_lines).pack(side=tk.LEFT,
+                                                                           padx=(14, 0))
+        ttk.Label(bar, text="e.g. 8, 16 or 8-48/8", foreground="#777").pack(
+            side=tk.LEFT, padx=(10, 0))
+
     def _build_canvas(self):
         frame = ttk.Frame(self)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -190,6 +220,7 @@ class DraftEditor(tk.Tk):
         self.warp_colors = list(draft.warp_colors)
         self.weft_colors = list(draft.weft_colors)
         self._sync_spinboxes()
+        self._trim_lines()
         self.run()
 
     def current_draft(self) -> Draft:
@@ -223,7 +254,8 @@ class DraftEditor(tk.Tk):
         draft = self.current_draft()
         self.warp_colors, self.weft_colors = draft.warp_colors, draft.weft_colors
         self._sync_spinboxes()
-        self.mark_stale()
+        self._trim_lines()
+        self.mark_custom()
 
     def clear(self):
         self.tie_up = [set() for _ in self.tie_up]
@@ -231,11 +263,16 @@ class DraftEditor(tk.Tk):
         self.threading = [i % NUM_SHAFTS + 1 for i in range(len(self.threading))]
         self.warp_colors = [DEFAULT_WARP_COLOR] * len(self.threading)
         self.weft_colors = [DEFAULT_WEFT_COLOR] * len(self.treadling)
-        self.mark_stale()
+        self.mark_custom()
 
     def mark_stale(self):
         self.stale = True
         self.redraw()
+
+    def mark_custom(self):
+        """The draft no longer matches its preset or file, so rename it."""
+        self.preset_var.set(CUSTOM_NAME)
+        self.mark_stale()
 
     def run(self):
         try:
@@ -273,6 +310,34 @@ class DraftEditor(tk.Tk):
 
     def color_weft(self):
         self._color_threads(self.weft_colors, self.weft_range.get(), "pick")
+
+    # ---------- guide lines ----------
+
+    def _add_lines(self, lines, text, count, noun):
+        try:
+            indices = parse_ranges(text, count, noun)
+        except ValueError as err:
+            messagebox.showerror("Can't add lines", str(err))
+            return
+        lines.update(i + 1 for i in indices)  # a line follows each listed end or pick
+        # Lines don't change the cloth, so no Run is needed.
+        self.redraw()
+
+    def add_v_lines(self):
+        self._add_lines(self.v_lines, self.v_lines_range.get(), len(self.threading), "end")
+
+    def add_h_lines(self):
+        self._add_lines(self.h_lines, self.h_lines_range.get(), len(self.treadling), "pick")
+
+    def clear_lines(self):
+        self.v_lines.clear()
+        self.h_lines.clear()
+        self.redraw()
+
+    def _trim_lines(self):
+        """Drop lines past the last end or pick after the draft shrinks."""
+        self.v_lines = {n for n in self.v_lines if n <= len(self.threading)}
+        self.h_lines = {n for n in self.h_lines if n <= len(self.treadling)}
 
     # ---------- editing ----------
 
@@ -316,13 +381,17 @@ class DraftEditor(tk.Tk):
             if (mark in cell) == self._paint_value:
                 return
             cell.symmetric_difference_update({mark})
-            self.mark_stale()
+            self.mark_custom()
             return
         else:
             return
         if values[i] != value:
             values[i] = value
-            self.mark_stale()
+            # Colours don't change the weave structure, so the name stays.
+            if name == "threading":
+                self.mark_custom()
+            else:
+                self.mark_stale()
 
     # ---------- drawing ----------
 
@@ -396,6 +465,21 @@ class DraftEditor(tk.Tk):
                 text=f"{ends} ends × {picks} picks, {treadles} treadles. Rising shed.",
                 foreground="")
 
+        # Group lines every fourth end, then the user's guide lines on top.
+        groups = range(GROUP_SIZE, ends, GROUP_SIZE)
+        columns = [o["warp_colors"], o["threading"], o["drawdown"]]
+        rows = [o["drawdown"], o["treadling"], o["weft_colors"]]
+        for lines, (color, width) in ((groups, GROUP_LINE), (self.v_lines, GUIDE_LINE)):
+            for n in lines:
+                for ox, oy, _, height in columns:
+                    c.create_line(ox + n * CELL, oy, ox + n * CELL, oy + height * CELL,
+                                  fill=color, width=width)
+        color, width = GUIDE_LINE
+        for n in self.h_lines:
+            for ox, oy, length, _ in rows:
+                c.create_line(ox, oy + n * CELL, ox + length * CELL, oy + n * CELL,
+                              fill=color, width=width)
+
         _, _, x2, y2 = c.bbox("all")
         c.configure(scrollregion=(0, 0, x2 + MARGIN, y2 + MARGIN))
 
@@ -407,16 +491,21 @@ class DraftEditor(tk.Tk):
             return
         try:
             with open(path) as f:
-                self.load_draft(Draft.from_dict(json.load(f)))
+                draft = Draft.from_dict(json.load(f))
         except (OSError, ValueError, KeyError) as err:
             messagebox.showerror("Could not open draft", str(err))
+            return
+        self.preset_var.set(draft.name or Path(path).stem)
+        self.load_draft(draft)
 
     def save_file(self):
         path = filedialog.asksaveasfilename(defaultextension=".json",
                                             filetypes=[("Draft", "*.json")])
         if path:
             with open(path, "w") as f:
-                json.dump(self.current_draft().to_dict(), f, indent=2)
+                draft = self.current_draft()
+                draft.name = self.preset_var.get()
+                json.dump(draft.to_dict(), f, indent=2)
 
     # ---------- printing ----------
 
@@ -469,6 +558,7 @@ class DraftEditor(tk.Tk):
 
         def options():
             return dict(layout=layout.get(), lowered=lowered.get(),
+                        v_lines=sorted(self.v_lines), h_lines=sorted(self.h_lines),
                         colors=colors.get(), title=title.get().strip())
 
         def preview():
